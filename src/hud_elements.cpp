@@ -887,7 +887,11 @@ void HudElements::fps(){
         }
         render_fps_value(load_color, true);
         ImGui::SameLine(0, 1.0f);
-        if(!HUDElements.params->enabled[OVERLAY_PARAM_ENABLED_hide_fps_superscript]){
+        // horizontal mode already shows "FPS" as the engine label
+        bool horizontal_fps_label = HUDElements.params->fps_text.empty() &&
+                                    HUDElements.params->enabled[OVERLAY_PARAM_ENABLED_horizontal] &&
+                                    !HUDElements.params->enabled[OVERLAY_PARAM_ENABLED_engine_short_names];
+        if(!HUDElements.params->enabled[OVERLAY_PARAM_ENABLED_hide_fps_superscript] && !horizontal_fps_label){
             ImGui::PushFont(HUDElements.sw_stats->font_small);
             HUDElements.TextColored(HUDElements.colors.text, "FPS");
             ImGui::PopFont();
