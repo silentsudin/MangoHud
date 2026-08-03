@@ -677,11 +677,35 @@ void render_imgui(swapchain_stats& data, struct overlay_params& params, ImVec2& 
    static float ralign_width = 0, old_scale = 0;
    auto io = ImGui::GetIO();
    if (real_params->enabled[OVERLAY_PARAM_ENABLED_fps_only]){
-      window_size = ImVec2((to_string(int(HUDElements.sw_stats->fps)).length() * ImGui::CalcTextSize("A").x) + 15.f, get_params()->height);
+      std::string fps_text = to_string(int(HUDElements.sw_stats->fps));
+      float fps_width = fps_text.length() * ImGui::CalcTextSize("A").x;
+      if (HUDElements.frame_generation.enabled) {
+         const double total_fps = HUDElements.frame_generation.fps > 0.0
+            ? HUDElements.frame_generation.fps
+            : HUDElements.sw_stats->fps;
+         fps_text += "/" + to_string(int(total_fps));
+         fps_width = std::max(ImGui::CalcTextSize(fps_text.c_str()).x,
+                              ImGui::CalcTextSize("000/000").x);
+      }
+      window_size = ImVec2(fps_width + 15.f, get_params()->height);
    } else if (real_params->enabled[OVERLAY_PARAM_ENABLED_horizontal]) {
       window_size = ImVec2(io.DisplaySize.x, real_params->height);
    } else {
-      window_size = ImVec2(real_params->width, real_params->height);
+      float width = real_params->width;
+      if (HUDElements.frame_generation.enabled &&
+          real_params->enabled[OVERLAY_PARAM_ENABLED_fps]) {
+         const double total_fps = HUDElements.frame_generation.fps > 0.0
+            ? HUDElements.frame_generation.fps
+            : HUDElements.sw_stats->fps;
+         char fps_text[32];
+         snprintf(fps_text, sizeof(fps_text), "%.0f/%.0f",
+                  HUDElements.sw_stats->fps, total_fps);
+         const float fps_width = std::max(ImGui::CalcTextSize(fps_text).x,
+                                          ImGui::CalcTextSize("000/000").x);
+         const float legacy_width = ImGui::CalcTextSize("A").x * 4.0f;
+         width += std::max(0.0f, fps_width - legacy_width);
+      }
+      window_size = ImVec2(width, real_params->height);
    }
    unsigned height = io.DisplaySize.y;
    auto now = Clock::now();

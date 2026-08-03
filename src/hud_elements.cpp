@@ -832,12 +832,48 @@ void HudElements::procmem()
 #endif
 }
 
+static void render_fps_value(ImVec4 real_color, bool right_aligned)
+{
+    if (!HUDElements.frame_generation.enabled) {
+        if (right_aligned)
+            right_aligned_text(real_color, HUDElements.ralign_width, "%.0f", HUDElements.sw_stats->fps);
+        else
+            HUDElements.TextColored(real_color, "%.0f", HUDElements.sw_stats->fps);
+        return;
+    }
+
+    char real_fps[16];
+    char total_fps[16];
+    snprintf(real_fps, sizeof(real_fps), "%.0f", HUDElements.sw_stats->fps);
+    snprintf(total_fps, sizeof(total_fps), "%.0f",
+             HUDElements.frame_generation.fps > 0.0
+                ? HUDElements.frame_generation.fps
+                : HUDElements.sw_stats->fps);
+
+    if (right_aligned && !HUDElements.params->enabled[OVERLAY_PARAM_ENABLED_hud_compact]) {
+        const float width = ImGui::CalcTextSize(real_fps).x +
+                            ImGui::CalcTextSize("/").x +
+                            ImGui::CalcTextSize(total_fps).x;
+        const float min_width = std::max(HUDElements.ralign_width,
+                                         ImGui::CalcTextSize("000/000").x);
+        ImGui::SetCursorPosX(ImGui::GetCursorPosX() +
+                             std::max(0.0f, min_width - width));
+    }
+
+    HUDElements.TextColored(real_color, "%s", real_fps);
+    ImGui::SameLine(0, 0.0f);
+    HUDElements.TextColored(HUDElements.colors.text, "/");
+    ImGui::SameLine(0, 0.0f);
+    HUDElements.TextColored(HUDElements.colors.engine, "%s", total_fps);
+}
+
 void HudElements::fps(){
     if (HUDElements.params->enabled[OVERLAY_PARAM_ENABLED_fps] && !HUDElements.params->enabled[OVERLAY_PARAM_ENABLED_fps_only]){
         ImguiNextColumnFirstItem();
         HUDElements.TextColored(HUDElements.colors.engine, "%s", engine_name(*HUDElements.sw_stats));
 
         ImguiNextColumnOrNewRow();
+        auto load_color = HUDElements.colors.text;
         if (HUDElements.params->enabled[OVERLAY_PARAM_ENABLED_fps_color_change]){
             int fps = int(HUDElements.sw_stats->fps);
             struct LOAD_DATA fps_data = {
@@ -847,12 +883,9 @@ void HudElements::fps(){
             HUDElements.params->fps_value[0],
             HUDElements.params->fps_value[1]
             };
-            auto load_color = change_on_load_temp(fps_data, fps);
-            right_aligned_text(load_color, HUDElements.ralign_width, "%.0f", HUDElements.sw_stats->fps);
+            load_color = change_on_load_temp(fps_data, fps);
         }
-        else {
-            right_aligned_text(HUDElements.colors.text, HUDElements.ralign_width, "%.0f", HUDElements.sw_stats->fps);
-        }
+        render_fps_value(load_color, true);
         ImGui::SameLine(0, 1.0f);
         if(!HUDElements.params->enabled[OVERLAY_PARAM_ENABLED_hide_fps_superscript]){
             ImGui::PushFont(HUDElements.sw_stats->font_small);
@@ -888,7 +921,7 @@ void HudElements::fps_only(){
             };
             load_color = change_on_load_temp(fps_data, fps);
         }
-        HUDElements.TextColored(load_color, "%.0f", HUDElements.sw_stats->fps);
+        render_fps_value(load_color, false);
     }
 }
 
@@ -972,6 +1005,17 @@ static inline double TransformInverse_Custom(double v, void*) {
 
 void HudElements::frame_timing(){
     if (HUDElements.params->enabled[OVERLAY_PARAM_ENABLED_frame_timing]){
+        double graph_min_frametime = min_frametime;
+        double graph_max_frametime = max_frametime;
+        if (HUDElements.frame_generation.enabled) {
+            for (float value : HUDElements.frame_generation.frametime_data) {
+                if (value <= 0.0f)
+                    continue;
+                if (graph_min_frametime <= 0.0 || value < graph_min_frametime)
+                    graph_min_frametime = value;
+                graph_max_frametime = std::max(graph_max_frametime, double(value));
+            }
+        }
         ImguiNextColumnFirstItem();
         ImGui::PushFont(HUDElements.sw_stats->font_small);
         if (!HUDElements.params->enabled[OVERLAY_PARAM_ENABLED_horizontal] && !HUDElements.params->enabled[OVERLAY_PARAM_ENABLED_hud_compact]){
@@ -1000,8 +1044,8 @@ void HudElements::frame_timing(){
         }
 
         if (HUDElements.params->enabled[OVERLAY_PARAM_ENABLED_dynamic_frame_timing]){
-            min_time = min_frametime;
-            max_time = max_frametime;
+            min_time = graph_min_frametime;
+            max_time = graph_max_frametime;
         }
         if (HUDElements.params->enabled[OVERLAY_PARAM_ENABLED_frame_timing_detailed]){
             height = 125;
@@ -1020,37 +1064,51 @@ void HudElements::frame_timing(){
                                 NULL, min_time, max_time,
                                 ImVec2(width, height));
 #else
-
                 if (HUDElements.params->enabled[OVERLAY_PARAM_ENABLED_horizontal]) {
+                    const ImVec2 graph_pos = ImGui::GetCursorPos();
                     ImGui::PlotLines(hash, get_time_stat, HUDElements.sw_stats,
-                    ARRAY_SIZE(HUDElements.sw_stats->frames_stats), 0,
-                    NULL, min_time, max_time,
-                    ImVec2(width, height));
-                } else {
-                    if (ImPlot::BeginPlot("My Plot", ImVec2(width, height), ImPlotFlags_CanvasOnly | ImPlotFlags_NoInputs)) {
-                        ImPlotStyle& style = ImPlot::GetStyle();
-                        style.Colors[ImPlotCol_PlotBg] = ImVec4(0.92f, 0.92f, 0.95f, 0.00f);
-                        style.Colors[ImPlotCol_AxisGrid] = ImVec4(0.0f, 0.0f, 0.0f, 1.0f);
-                        style.Colors[ImPlotCol_AxisTick] = ImVec4(0.0f, 0.0f, 0.0f, 1.0f);
-                        ImPlotAxisFlags ax_flags_x = ImPlotAxisFlags_NoDecorations;
-                        ImPlotAxisFlags ax_flags_y = ImPlotAxisFlags_NoDecorations;
-                        if (HUDElements.params->enabled[OVERLAY_PARAM_ENABLED_frame_timing_detailed])
-                            ax_flags_y = ImPlotAxisFlags_Opposite | ImPlotAxisFlags_NoMenus;
-
-                        ImPlot::SetupAxes(nullptr, nullptr, ax_flags_x, ax_flags_y);
-                        ImPlot::SetupAxisScale(ImAxis_Y1, TransformForward_Custom, TransformInverse_Custom);
-                        ImPlot::SetupAxesLimits(0, 200, min_time, max_time, ImGuiCond_Always);
-                        ImPlot::SetNextLineStyle(HUDElements.colors.frametime, 1.5);
-                        ImPlot::PlotLine("frametime line", frametime_data.data(), frametime_data.size());
-                        if (HUDElements.params->enabled[OVERLAY_PARAM_ENABLED_throttling_status_graph] &&
-                            gpus && gpus->active_gpu() && gpus->active_gpu()->throttling()){
-                            ImPlot::SetNextLineStyle(ImVec4(1.0f, 1.0f, 0.0f, 1.0f), 1.5);
-                            ImPlot::PlotLine("power line", gpus->active_gpu()->throttling()->power.data(), gpus->active_gpu()->throttling()->power.size());
-                            ImPlot::SetNextLineStyle(ImVec4(1.0f, 0.0f, 0.0f, 1.0f), 1.5);
-                            ImPlot::PlotLine("thermal line", gpus->active_gpu()->throttling()->thermal.data(), gpus->active_gpu()->throttling()->thermal.size());
-                        }
-                        ImPlot::EndPlot();
+                                     ARRAY_SIZE(HUDElements.sw_stats->frames_stats), 0,
+                                     NULL, min_time, max_time,
+                                     ImVec2(width, height));
+                    if (HUDElements.frame_generation.enabled && HUDElements.frame_generation.fps > 0.0) {
+                        ImGui::SetCursorPos(graph_pos);
+                        ImGui::PushStyleColor(ImGuiCol_PlotLines, HUDElements.colors.engine);
+                        ImGui::PlotLines("##frame_generation_frame_timing",
+                                         HUDElements.frame_generation.frametime_data.data(),
+                                         HUDElements.frame_generation.frametime_data.size(), 0,
+                                         NULL, min_time, max_time,
+                                         ImVec2(width, height));
+                        ImGui::PopStyleColor();
                     }
+                } else if (ImPlot::BeginPlot(hash, ImVec2(width, height), ImPlotFlags_CanvasOnly | ImPlotFlags_NoInputs)) {
+                    ImPlotStyle& style = ImPlot::GetStyle();
+                    style.Colors[ImPlotCol_PlotBg] = ImVec4(0.92f, 0.92f, 0.95f, 0.00f);
+                    style.Colors[ImPlotCol_AxisGrid] = ImVec4(0.0f, 0.0f, 0.0f, 1.0f);
+                    style.Colors[ImPlotCol_AxisTick] = ImVec4(0.0f, 0.0f, 0.0f, 1.0f);
+                    ImPlotAxisFlags ax_flags_x = ImPlotAxisFlags_NoDecorations;
+                    ImPlotAxisFlags ax_flags_y = ImPlotAxisFlags_NoDecorations;
+                    if (HUDElements.params->enabled[OVERLAY_PARAM_ENABLED_frame_timing_detailed])
+                        ax_flags_y = ImPlotAxisFlags_Opposite | ImPlotAxisFlags_NoMenus;
+
+                    ImPlot::SetupAxes(nullptr, nullptr, ax_flags_x, ax_flags_y);
+                    ImPlot::SetupAxisScale(ImAxis_Y1, TransformForward_Custom, TransformInverse_Custom);
+                    ImPlot::SetupAxesLimits(0, 200, min_time, max_time, ImGuiCond_Always);
+                    ImPlot::SetNextLineStyle(HUDElements.colors.frametime, 1.5);
+                    ImPlot::PlotLine("frametime line", frametime_data.data(), frametime_data.size());
+                    if (HUDElements.frame_generation.enabled && HUDElements.frame_generation.fps > 0.0) {
+                        ImPlot::SetNextLineStyle(HUDElements.colors.engine, 1.5);
+                        ImPlot::PlotLine("frame generation frametime line",
+                                       HUDElements.frame_generation.frametime_data.data(),
+                                       HUDElements.frame_generation.frametime_data.size());
+                    }
+                    if (HUDElements.params->enabled[OVERLAY_PARAM_ENABLED_throttling_status_graph] &&
+                        gpus && gpus->active_gpu() && gpus->active_gpu()->throttling()){
+                        ImPlot::SetNextLineStyle(ImVec4(1.0f, 1.0f, 0.0f, 1.0f), 1.5);
+                        ImPlot::PlotLine("power line", gpus->active_gpu()->throttling()->power.data(), gpus->active_gpu()->throttling()->power.size());
+                        ImPlot::SetNextLineStyle(ImVec4(1.0f, 0.0f, 0.0f, 1.0f), 1.5);
+                        ImPlot::PlotLine("thermal line", gpus->active_gpu()->throttling()->thermal.data(), gpus->active_gpu()->throttling()->thermal.size());
+                    }
+                    ImPlot::EndPlot();
                 }
 #endif
             }

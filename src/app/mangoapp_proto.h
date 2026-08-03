@@ -17,6 +17,11 @@ struct mangoapp_msg_v1 {
     uint64_t latency_ns;
     uint32_t outputWidth;
     uint32_t outputHeight;
+    uint16_t displayRefresh;
+    uint8_t gamescopeFlags; /* bAppWantsHDR and bSteamFocused bitfield storage */
+    char engineName[40];
+    uint64_t frameGenerationOutputFrametimeNs; /* completed output flip interval, or UINT64_MAX */
+    uint8_t frameGenerationEnabled; /* 0 disables the frame generation HUD additions */
     // WARNING: Always ADD fields, never remove or repurpose fields
 } __attribute__((packed));
 

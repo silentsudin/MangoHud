@@ -9,6 +9,7 @@
 #include "imgui.h"
 #include "imgui_impl_glfw.h"
 #include "imgui_impl_opengl3.h"
+#include <algorithm>
 #include <stdio.h>
 #include <thread>
 #include <chrono>
@@ -152,6 +153,48 @@ static void ctrl_thread(){
 
 bool new_frame = false;
 
+static bool message_has_field(size_t msg_size, size_t field_offset, size_t field_size)
+{
+    // msgrcv returns the payload size without the leading long message type.
+    return msg_size + sizeof(long) >= field_offset + field_size;
+}
+
+static void reset_frame_generation_stats(bool enabled)
+{
+    auto& stats = HUDElements.frame_generation;
+    stats.enabled = enabled;
+    stats.fps = 0.0;
+    stats.sample_time_ns = 0;
+    stats.sample_count = 0;
+    std::fill(stats.frametime_data.begin(), stats.frametime_data.end(), 0.0f);
+}
+
+static void update_frame_generation_stats(bool enabled, uint64_t output_frametime_ns,
+                                          uint64_t sampling_period_ns)
+{
+    auto& stats = HUDElements.frame_generation;
+    if (stats.enabled != enabled)
+        reset_frame_generation_stats(enabled);
+
+    if (!enabled || output_frametime_ns == uint64_t(-1) || output_frametime_ns == 0)
+        return;
+
+    stats.frametime_data.push_back(output_frametime_ns / 1000000.0f);
+    stats.frametime_data.erase(stats.frametime_data.begin());
+    stats.sample_time_ns += output_frametime_ns;
+    stats.sample_count++;
+
+    if (stats.fps == 0.0)
+        stats.fps = 1000000000.0 / output_frametime_ns;
+
+    if (stats.sample_time_ns >= sampling_period_ns)
+    {
+        stats.fps = 1000000000.0 * stats.sample_count / stats.sample_time_ns;
+        stats.sample_time_ns = 0;
+        stats.sample_count = 0;
+    }
+}
+
 static void gamescope_frametime(uint64_t app_frametime_ns, uint64_t latency_ns){
     if (app_frametime_ns != uint64_t(-1))
     {
@@ -189,7 +232,7 @@ static void msg_read_thread(){
         if (msg_size != size_t(-1))
         {
             if (hdr->version == 1){
-                if (msg_size > offsetof(struct mangoapp_msg_v1, pid)) {
+                if (message_has_field(msg_size, offsetof(struct mangoapp_msg_v1, pid), sizeof(mangoapp_v1->pid))) {
                     HUDElements.g_gamescopePid = mangoapp_v1->pid;
 
                     if (previous_game_pid != mangoapp_v1->pid) {
@@ -198,15 +241,31 @@ static void msg_read_thread(){
                     }
                 }
 
-                if (msg_size > offsetof(struct mangoapp_msg_v1, visible_frametime_ns)){
+                if (message_has_field(msg_size, offsetof(struct mangoapp_msg_v1, visible_frametime_ns),
+                                      sizeof(mangoapp_v1->visible_frametime_ns))){
                     auto real_params = get_params();
                     bool should_new_frame = false;
+
+                    const bool has_frame_generation_enabled = message_has_field(
+                        msg_size, offsetof(struct mangoapp_msg_v1, frameGenerationEnabled),
+                        sizeof(mangoapp_v1->frameGenerationEnabled));
+                    const bool has_frame_generation_frametime = message_has_field(
+                        msg_size, offsetof(struct mangoapp_msg_v1, frameGenerationOutputFrametimeNs),
+                        sizeof(mangoapp_v1->frameGenerationOutputFrametimeNs));
+                    update_frame_generation_stats(
+                        has_frame_generation_enabled && mangoapp_v1->frameGenerationEnabled,
+                        has_frame_generation_frametime
+                            ? mangoapp_v1->frameGenerationOutputFrametimeNs
+                            : uint64_t(-1),
+                        real_params->fps_sampling_period);
+
                     if (mangoapp_v1->visible_frametime_ns != ~(0lu) && (!real_params->no_display || logger->is_active())) {
                         update_hud_info_with_frametime(sw_stats, params, vendorID, mangoapp_v1->visible_frametime_ns);
                         should_new_frame = true;
                     }
 
-                    if (msg_size > offsetof(mangoapp_msg_v1, fsrUpscale)){
+                    if (message_has_field(msg_size, offsetof(mangoapp_msg_v1, fsrSharpness),
+                                          sizeof(mangoapp_v1->fsrSharpness))){
                         HUDElements.g_fsrUpscale = mangoapp_v1->fsrUpscale;
                         if (real_params->fsr_steam_sharpness < 0)
                             HUDElements.g_fsrSharpness = mangoapp_v1->fsrSharpness;
@@ -219,7 +278,8 @@ static void msg_read_thread(){
                         steam_focused = false;
                     }
 
-                    if (msg_size > offsetof(mangoapp_msg_v1, latency_ns))
+                    if (message_has_field(msg_size, offsetof(mangoapp_msg_v1, latency_ns),
+                                          sizeof(mangoapp_v1->latency_ns)))
                         gamescope_frametime(mangoapp_v1->app_frametime_ns, mangoapp_v1->latency_ns);
 
                     if (should_new_frame)
@@ -229,8 +289,11 @@ static void msg_read_thread(){
                             new_frame = true;
                         }
                         mangoapp_cv.notify_one();
-                        screenWidth = mangoapp_v1->outputWidth;
-                        screenHeight = mangoapp_v1->outputHeight;
+                        if (message_has_field(msg_size, offsetof(mangoapp_msg_v1, outputHeight),
+                                              sizeof(mangoapp_v1->outputHeight))) {
+                            screenWidth = mangoapp_v1->outputWidth;
+                            screenHeight = mangoapp_v1->outputHeight;
+                        }
                     }
                 }
             } else {
