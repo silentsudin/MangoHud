@@ -23,6 +23,7 @@
 #include <filesystem.h>
 
 #include "gpu_metrics_util.h"
+#include "rapl.h"
 
 struct hwmon_sensor {
     std::regex rx;
@@ -91,6 +92,17 @@ private:
     float get_power_usage();
     float last_power = 0;
 
+    // Integrated Intel GPUs have no hwmon; their power is the RAPL "uncore" domain.
+    RaplCounter rapl_uncore;
+    unsigned rapl_uncore_retry = 0;
+    bool has_hwmon_power();
+
+    // Integrated GPUs place buffers in system memory (gtt) instead of vram.
+    bool integrated_memory = false;
+    void update_memory_type();
+    int xe_fd = -1;
+    bool get_xe_sysmem_usage(float& used, float& total);
+
     std::ifstream gpu_clock_stream;
     void find_i915_gt_dir();
     void find_xe_gt_dir();
@@ -156,21 +168,7 @@ public:
             drm_memory_type = "drm-resident-memory";
         }
 
-        if (fdinfo_data.size() > 0 &&
-            fdinfo_data[0].find(drm_memory_type) == fdinfo_data[0].end())
-        {
-            auto old_type = drm_memory_type;
-
-            if (module == "i915")
-                drm_memory_type = "drm-resident-system0";
-            else if (module == "xe")
-                drm_memory_type = "drm-resident-gtt";
-
-            SPDLOG_DEBUG(
-                "\"{}\" is not found, you probably have an integrated GPU. "
-                "Using \"{}\"", old_type, drm_memory_type
-            );
-        }
+        update_memory_type();
 
         SPDLOG_DEBUG(
             "drm_engine_type = {}, drm_memory_type = {}",
@@ -222,6 +220,8 @@ public:
         stop_thread = true;
         if (thread.joinable())
             thread.join();
+        if (xe_fd >= 0)
+            close(xe_fd);
     }
 
     gpu_metrics copy_metrics() const

@@ -4,6 +4,13 @@
 #include "hud_elements.h"
 #endif
 
+#include <fcntl.h>
+#include <sys/ioctl.h>
+#if __has_include(<drm/xe_drm.h>)
+#include <drm/xe_drm.h>
+#define HAVE_XE_DRM_H 1
+#endif
+
 namespace fs = ghc::filesystem;
 
 void GPU_fdinfo::find_fd()
@@ -143,6 +150,96 @@ uint64_t GPU_fdinfo::get_gpu_time_panfrost() {
     }
 
     return total;
+}
+
+static bool fdinfo_has_value(
+    const std::vector<std::map<std::string, std::string>>& data, const std::string& key)
+{
+    for (auto& fd : data) {
+        auto it = fd.find(key);
+        if (it != fd.end() && !it->second.empty())
+            return true;
+    }
+
+    return false;
+}
+
+// Discrete Intel GPUs report vram (local0/vram0) in fdinfo, integrated ones only
+// system memory. Re-evaluated every update, because the fds tracked at startup
+// may not have any allocations yet.
+void GPU_fdinfo::update_memory_type()
+{
+    if (integrated_memory || fdinfo_data.empty())
+        return;
+
+    std::string sysmem_type;
+    if (module == "i915")
+        sysmem_type = "drm-resident-system0";
+    else if (module == "xe")
+        sysmem_type = "drm-resident-gtt";
+    else
+        return;
+
+    if (fdinfo_has_value(fdinfo_data, drm_memory_type) ||
+        !fdinfo_has_value(fdinfo_data, sysmem_type))
+        return;
+
+    SPDLOG_DEBUG(
+        "\"{}\" is not found, you probably have an integrated GPU. "
+        "Using \"{}\"", drm_memory_type, sysmem_type
+    );
+
+    drm_memory_type = sysmem_type;
+    integrated_memory = true;
+}
+
+// System-wide GPU memory in system RAM, as accounted by xe for all clients.
+bool GPU_fdinfo::get_xe_sysmem_usage(float& used, float& total)
+{
+#ifdef HAVE_XE_DRM_H
+    if (module != "xe")
+        return false;
+
+    if (xe_fd < 0) {
+        xe_fd = open(("/dev/dri/" + drm_node).c_str(), O_RDWR | O_CLOEXEC);
+        if (xe_fd < 0)
+            return false;
+    }
+
+    struct drm_xe_device_query query = {};
+    query.query = DRM_XE_DEVICE_QUERY_MEM_REGIONS;
+
+    if (ioctl(xe_fd, DRM_IOCTL_XE_DEVICE_QUERY, &query) || query.size == 0)
+        return false;
+
+    std::vector<uint8_t> buf(query.size);
+    query.data = reinterpret_cast<uintptr_t>(buf.data());
+
+    if (ioctl(xe_fd, DRM_IOCTL_XE_DEVICE_QUERY, &query))
+        return false;
+
+    auto regions = reinterpret_cast<struct drm_xe_query_mem_regions*>(buf.data());
+    for (uint32_t i = 0; i < regions->num_mem_regions; i++) {
+        auto& region = regions->mem_regions[i];
+
+        // A vram region means a discrete GPU, which is not handled here.
+        if (region.mem_class == DRM_XE_MEM_REGION_CLASS_VRAM)
+            return false;
+    }
+
+    for (uint32_t i = 0; i < regions->num_mem_regions; i++) {
+        auto& region = regions->mem_regions[i];
+
+        if (region.mem_class != DRM_XE_MEM_REGION_CLASS_SYSMEM || region.used == 0)
+            continue;
+
+        used = static_cast<float>(region.used) / 1024 / 1024 / 1024;
+        total = static_cast<float>(region.total_size) / 1024 / 1024 / 1024;
+        return true;
+    }
+#endif
+
+    return false;
 }
 
 float GPU_fdinfo::get_memory_used()
@@ -303,8 +400,27 @@ void GPU_fdinfo::get_current_hwmon_readings()
     }
 }
 
+bool GPU_fdinfo::has_hwmon_power()
+{
+    return !hwmon_sensors["power"].filename.empty() ||
+           !hwmon_sensors["energy"].filename.empty();
+}
+
 float GPU_fdinfo::get_power_usage()
 {
+    if ((module == "xe" || module == "i915") && !has_hwmon_power()) {
+        // Retry roughly every 10 seconds until the counter becomes readable.
+        if (!rapl_uncore.is_open() && rapl_uncore_retry++ % (10'000 / METRICS_UPDATE_PERIOD_MS) == 0) {
+            std::string uncore = find_rapl_domain("uncore");
+            if (!uncore.empty() && rapl_uncore.open(uncore))
+                SPDLOG_DEBUG("Using RAPL {} for integrated GPU power", uncore);
+        }
+
+        float watts = 0.f;
+        rapl_uncore.read(watts);
+        return watts;
+    }
+
     if (!hwmon_sensors["power"].filename.empty())
         return static_cast<float>(hwmon_sensors["power"].val) / 1'000'000;
 
@@ -728,8 +844,20 @@ void GPU_fdinfo::main_thread()
         gather_fdinfo_data();
         get_current_hwmon_readings();
 
+        update_memory_type();
+
         metrics.load = get_gpu_load();
         metrics.proc_vram_used = get_memory_used();
+
+        if (integrated_memory || module == "xe") {
+            float used = 0.f, total = 0.f;
+            if (get_xe_sysmem_usage(used, total)) {
+                metrics.sys_vram_used = used;
+                metrics.memoryTotal = total;
+            } else if (integrated_memory) {
+                metrics.sys_vram_used = metrics.proc_vram_used;
+            }
+        }
 
         metrics.powerUsage = get_power_usage();
         metrics.powerLimit = static_cast<float>(hwmon_sensors["power_limit"].val) / 1'000'000;
